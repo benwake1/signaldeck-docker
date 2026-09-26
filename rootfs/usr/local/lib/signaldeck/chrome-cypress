@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Chrome wrapper picked up by RunCypressTestJob::resolveChromiumBinary().
+# Adds flags needed to run Chrome as a service inside a container.
+exec /usr/bin/google-chrome-stable \
+    --disable-gpu \
+    --no-sandbox \
+    --disable-dev-shm-usage \
+    "$@"

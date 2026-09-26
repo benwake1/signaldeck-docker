@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Container health: the web endpoint answers (web roles) and every
+# supervised process is RUNNING (all roles).
+set -euo pipefail
+
+role="$(cat /run/signaldeck/role 2>/dev/null || true)"
+[[ -n "${role}" ]] || exit 1   # still starting up
+
+if [[ "${role}" == all || "${role}" == web ]]; then
+    curl -fsS -o /dev/null --max-time 5 http://127.0.0.1/up
+fi
+
+supervisorctl -c /etc/supervisor/supervisord.conf status \
+    | awk '$2 != "RUNNING" { bad = 1 } END { exit bad }'

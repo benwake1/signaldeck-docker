@@ -1,0 +1,98 @@
+{
+  "version": "3",
+  "templates": [
+    {
+      "type": 3,
+      "title": "SignalDeck CI",
+      "description": "Self-hosted Cypress & Playwright test dashboard with live logs, branded reports and scheduled runs. Includes MySQL and Redis.",
+      "note": "Set APP_URL to the address you will open SignalDeck on. Secrets can be generated with <code>openssl rand -hex 24</code>. The web UI listens on HTTP_PORT (default 8080).",
+      "categories": [
+        "Development",
+        "Testing"
+      ],
+      "platform": "linux",
+      "logo": "https://raw.githubusercontent.com/benwake1/signaldeck-ci-server/main/public/images/brand-symbol.png",
+      "repository": {
+        "url": "https://github.com/benwake1/signaldeck-docker",
+        "stackfile": "docker-compose.yml"
+      },
+      "env": [
+        {
+          "name": "APP_URL",
+          "label": "Public URL",
+          "description": "e.g. https://signaldeck.example.com"
+        },
+        {
+          "name": "COMPOSE_PROFILES",
+          "label": "Public access",
+          "description": "https = built-in Caddy + Let's Encrypt (needs ports 80/443), tunnel = Cloudflare Tunnel, empty = plain HTTP",
+          "select": [
+            {
+              "text": "Plain HTTP on HTTP port",
+              "value": "",
+              "default": true
+            },
+            {
+              "text": "HTTPS via built-in Caddy",
+              "value": "https"
+            },
+            {
+              "text": "Cloudflare Tunnel",
+              "value": "tunnel"
+            }
+          ]
+        },
+        {
+          "name": "SIGNALDECK_DOMAIN",
+          "label": "Domain (Caddy)",
+          "description": "e.g. sdtest.example.com \u2014 DNS must point at this server"
+        },
+        {
+          "name": "CLOUDFLARE_TUNNEL_TOKEN",
+          "label": "Cloudflare Tunnel token"
+        },
+        {
+          "name": "DB_PASSWORD",
+          "label": "MySQL password"
+        },
+        {
+          "name": "DB_ROOT_PASSWORD",
+          "label": "MySQL root password"
+        },
+        {
+          "name": "REDIS_PASSWORD",
+          "label": "Redis password"
+        },
+        {
+          "name": "APP_KEY",
+          "label": "App key (optional)",
+          "description": "base64:... \u2014 generated on first boot if empty; back it up"
+        },
+        {
+          "name": "ADMIN_EMAIL",
+          "label": "Admin email"
+        },
+        {
+          "name": "ADMIN_PASSWORD",
+          "label": "Admin password",
+          "description": "Used on first boot only"
+        },
+        {
+          "name": "HTTP_PORT",
+          "label": "HTTP port",
+          "default": "8080"
+        },
+        {
+          "name": "WORKER_PROCESSES",
+          "label": "Concurrent test runs",
+          "default": "3"
+        },
+        {
+          "name": "SIGNALDECK_TAG",
+          "label": "Image tag",
+          "default": "latest"
+        }
+      ]
+    }
+  ]
+}

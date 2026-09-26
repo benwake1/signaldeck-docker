@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# =============================================================================
+# SignalDeck CI container entrypoint
+#
+# Roles (first argument, or SIGNALDECK_ROLE):
+#   all        Nginx + PHP-FPM + queue workers + scheduler (default)
+#   web        Nginx + PHP-FPM; runs migrations
+#   worker     Queue workers (cypress + default queues)
+#   scheduler  Laravel scheduler (cleanup, pruning, cron-scheduled suites)
+#
+# Any other command (e.g. `php artisan about`) is executed as-is after the
+# APP_KEY has been resolved.
+#
+# Runs on every start — everything here must be idempotent.
+# =============================================================================
+set -Eeuo pipefail
+
+APP_DIR=/var/www/app
+DATA_DIR="${APP_DIR}/storage/app"
+STATE_DIR="${DATA_DIR}/.signaldeck"
+TEMPLATES=/etc/signaldeck
+ROLES="all web worker scheduler"
+
+log()     { echo "[signaldeck] $*"; }
+warn()    { echo "[signaldeck] WARNING: $*" >&2; }
+fail()    { echo "[signaldeck] ERROR: $*" >&2; exit 1; }
+artisan() { runuser -u www-data -- php "${APP_DIR}/artisan" "$@"; }
+is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Role selection
+# ─────────────────────────────────────────────────────────────────────────────
+ROLE="${SIGNALDECK_ROLE:-all}"
+PASSTHROUGH=0
+if [[ $# -gt 0 ]]; then
+    if [[ " ${ROLES} " == *" $1 "* ]]; then
+        ROLE="$1"
+        shift
+    else
+        PASSTHROUGH=1
+    fi
+fi
+[[ " ${ROLES} " == *" ${ROLE} "* ]] || fail "Unknown role '${ROLE}'. Expected one of: ${ROLES}"
+
+runs_web()     { [[ "${ROLE}" == all || "${ROLE}" == web ]]; }
+runs_workers() { [[ "${ROLE}" == all || "${ROLE}" == worker ]]; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APP_KEY — use the env var, otherwise generate once and keep it in the data
+# volume so every container sharing that volume uses the same key.
+# ─────────────────────────────────────────────────────────────────────────────
+resolve_app_key() {
+    if [[ -n "${APP_KEY:-}" ]]; then
+        return
+    fi
+
+    local keyfile="${STATE_DIR}/app.key"
+    mkdir -p "${STATE_DIR}"
+    chmod 700 "${STATE_DIR}"
+    chown www-data:www-data "${STATE_DIR}"
+
+    exec 9>"${STATE_DIR}/.app.key.lock"
+    flock 9
+    if [[ ! -s "${keyfile}" ]]; then
+        log "No APP_KEY set — generating one and storing it in the data volume."
+        log "Back it up: encrypted settings cannot be read without it."
+        (umask 077 && php -r 'echo "base64:" . base64_encode(random_bytes(32));' > "${keyfile}")
+        chown www-data:www-data "${keyfile}"
+    fi
+    flock -u 9
+    exec 9>&-
+
+    APP_KEY="$(<"${keyfile}")"
+    export APP_KEY
+}
+
+if [[ ${PASSTHROUGH} -eq 1 ]]; then
+    resolve_app_key
+    exec "$@"
+fi
+
+log "Starting SignalDeck CI ${APP_VERSION:-unknown} (role: ${ROLE})"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuration checks
+# ─────────────────────────────────────────────────────────────────────────────
+case "${DB_CONNECTION:-}" in
+    mysql|mariadb) ;;
+    *) fail "DB_CONNECTION='${DB_CONNECTION:-}' is not supported. This image supports MySQL/MariaDB only." ;;
+esac
+[[ -n "${DB_PASSWORD:-}" ]] || fail "DB_PASSWORD is required."
+[[ -n "${APP_URL:-}" ]]     || fail "APP_URL is required (the public URL users open, e.g. https://signaldeck.example.com)."
+
+if [[ "${QUEUE_CONNECTION:-}" != redis || "${CACHE_STORE:-}" != redis ]]; then
+    warn "QUEUE_CONNECTION/CACHE_STORE are not 'redis'. Redis is the supported production configuration."
+fi
+
+# Timeouts must nest: job timeout < worker --timeout < queue retry_after,
+# otherwise long runs get killed or re-queued mid-flight.
+CYPRESS_JOB_TIMEOUT="${CYPRESS_JOB_TIMEOUT:-10800}"
+WORKER_TIMEOUT="${WORKER_TIMEOUT:-$(( CYPRESS_JOB_TIMEOUT + 3600 ))}"
+REDIS_QUEUE_RETRY_AFTER="${REDIS_QUEUE_RETRY_AFTER:-$(( WORKER_TIMEOUT + 60 ))}"
+DB_QUEUE_RETRY_AFTER="${DB_QUEUE_RETRY_AFTER:-${REDIS_QUEUE_RETRY_AFTER}}"
+WORKER_PROCESSES="${WORKER_PROCESSES:-3}"
+WORKER_STOP_WAIT="${WORKER_STOP_WAIT:-900}"
+PHP_FPM_MAX_CHILDREN="${PHP_FPM_MAX_CHILDREN:-30}"
+PHP_MEMORY_LIMIT="${PHP_MEMORY_LIMIT:-512M}"
+MAX_UPLOAD_SIZE="${MAX_UPLOAD_SIZE:-100M}"
+TRUSTED_PROXIES="${TRUSTED_PROXIES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1,::1}"
+
+for var in CYPRESS_JOB_TIMEOUT WORKER_TIMEOUT REDIS_QUEUE_RETRY_AFTER DB_QUEUE_RETRY_AFTER \
+           WORKER_PROCESSES WORKER_STOP_WAIT PHP_FPM_MAX_CHILDREN; do
+    is_int "${!var}" || fail "${var} must be a whole number (got '${!var}')."
+done
+(( WORKER_PROCESSES >= 1 && WORKER_PROCESSES <= 32 )) || fail "WORKER_PROCESSES must be between 1 and 32."
+(( PHP_FPM_MAX_CHILDREN >= 2 ))                       || fail "PHP_FPM_MAX_CHILDREN must be at least 2."
+(( WORKER_TIMEOUT > CYPRESS_JOB_TIMEOUT ))            || warn "WORKER_TIMEOUT should be greater than CYPRESS_JOB_TIMEOUT."
+(( REDIS_QUEUE_RETRY_AFTER > WORKER_TIMEOUT ))        || warn "REDIS_QUEUE_RETRY_AFTER should be greater than WORKER_TIMEOUT."
+[[ "${MAX_UPLOAD_SIZE}" =~ ^[0-9]+[KkMmGg]?$ ]]       || fail "MAX_UPLOAD_SIZE must look like 100M."
+[[ "${PHP_MEMORY_LIMIT}" =~ ^(-1|[0-9]+[KkMmGg]?)$ ]] || fail "PHP_MEMORY_LIMIT must look like 512M."
+[[ "${TRUSTED_PROXIES}" =~ ^[0-9A-Fa-f:.,/*\ ]+$ ]]    || fail "TRUSTED_PROXIES must be a comma-separated list of IPs/CIDRs, or '*'."
+
+export CYPRESS_JOB_TIMEOUT WORKER_TIMEOUT REDIS_QUEUE_RETRY_AFTER DB_QUEUE_RETRY_AFTER
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Directories — volumes may be empty or owned by another UID
+# ─────────────────────────────────────────────────────────────────────────────
+mkdir -p \
+    "${DATA_DIR}/public" \
+    "${DATA_DIR}/private/reports" \
+    "${APP_DIR}/storage/framework/cache/data" \
+    "${APP_DIR}/storage/framework/sessions" \
+    "${APP_DIR}/storage/framework/views" \
+    "${APP_DIR}/storage/logs" \
+    "${APP_DIR}/bootstrap/cache" \
+    /var/www/.cache /var/www/.ssh /run/php /run/signaldeck
+chmod 700 /var/www/.ssh
+# Only touch files with the wrong owner — the volumes can hold a lot of files.
+find "${APP_DIR}/storage" "${APP_DIR}/bootstrap/cache" /var/www/.cache /var/www/.ssh \
+    \! -user www-data -exec chown www-data:www-data {} +
+
+resolve_app_key
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Render Nginx / PHP-FPM / Supervisor config for this role
+# ─────────────────────────────────────────────────────────────────────────────
+render_web_config() {
+    local proxies="${TRUSTED_PROXIES// /}" real_ip="" entry
+    [[ "${proxies}" == "*" ]] && proxies="0.0.0.0/0,::/0"
+    IFS=',' read -ra entries <<< "${proxies}"
+    for entry in "${entries[@]}"; do
+        [[ -n "${entry}" ]] && real_ip+="    set_real_ip_from ${entry};\n"
+    done
+
+    sed -e "s|__SET_REAL_IP_FROM__|${real_ip}|" \
+        -e "s|__MAX_UPLOAD_SIZE__|${MAX_UPLOAD_SIZE}|" \
+        "${TEMPLATES}/nginx/signaldeck.conf" > /etc/nginx/sites-enabled/signaldeck.conf
+
+    # pm.* values must satisfy min_spare <= start <= max_spare <= max_children
+    local max=${PHP_FPM_MAX_CHILDREN}
+    local max_spare=$(( max < 8 ? max : 8 ))
+    local start=$(( max_spare < 4 ? max_spare : 4 ))
+    local min_spare=$(( start < 2 ? start : 2 ))
+    sed -e "s|__MAX_CHILDREN__|${max}|" \
+        -e "s|__START_SERVERS__|${start}|" \
+        -e "s|__MIN_SPARE__|${min_spare}|" \
+        -e "s|__MAX_SPARE__|${max_spare}|" \
+        "${TEMPLATES}/php/www.conf" > /etc/php/8.4/fpm/pool.d/www.conf
+
+    cat > /etc/php/8.4/fpm/conf.d/99-signaldeck-runtime.ini <<EOF
+memory_limit = ${PHP_MEMORY_LIMIT}
+upload_max_filesize = ${MAX_UPLOAD_SIZE}
+post_max_size = ${MAX_UPLOAD_SIZE}
+EOF
+}
+
+render_supervisor_config() {
+    local programs program
+    case "${ROLE}" in
+        all)       programs="nginx php-fpm worker scheduler" ;;
+        web)       programs="nginx php-fpm" ;;
+        worker)    programs="worker" ;;
+        scheduler) programs="scheduler" ;;
+    esac
+
+    rm -f /etc/supervisor/conf.d/*.conf
+    for program in ${programs}; do
+        sed -e "s|__WORKER_PROCESSES__|${WORKER_PROCESSES}|" \
+            -e "s|__WORKER_TIMEOUT__|${WORKER_TIMEOUT}|" \
+            -e "s|__WORKER_STOP_WAIT__|${WORKER_STOP_WAIT}|" \
+            "${TEMPLATES}/supervisor/${program}.conf" > "/etc/supervisor/conf.d/${program}.conf"
+    done
+}
+
+runs_web && render_web_config
+render_supervisor_config
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Wait for MySQL and Redis
+# ─────────────────────────────────────────────────────────────────────────────
+wait_for() {
+    local name="$1" script="$2" timeout="${SERVICE_WAIT_TIMEOUT:-120}" start=${SECONDS}
+    log "Waiting for ${name}..."
+    until php -r "${script}" 2>/tmp/signaldeck-wait.err; do
+        if (( SECONDS - start >= timeout )); then
+            fail "${name} not reachable after ${timeout}s: $(cat /tmp/signaldeck-wait.err)"
+        fi
+        sleep 2
+    done
+    log "${name} is ready."
+}
+
+wait_for "MySQL" '
+    $dsn = sprintf("mysql:host=%s;port=%s;dbname=%s", getenv("DB_HOST"), getenv("DB_PORT") ?: "3306", getenv("DB_DATABASE"));
+    try {
+        new PDO($dsn, getenv("DB_USERNAME"), getenv("DB_PASSWORD"), [PDO::ATTR_TIMEOUT => 3]);
+    } catch (Throwable $e) {
+        fwrite(STDERR, $e->getMessage());
+        exit(1);
+    }
+'
+
+if [[ "${QUEUE_CONNECTION:-}" == redis || "${CACHE_STORE:-}" == redis ]]; then
+    wait_for "Redis" '
+        $pass = getenv("REDIS_PASSWORD");
+        $user = getenv("REDIS_USERNAME");
+        try {
+            $r = new Redis();
+            $r->connect(getenv("REDIS_HOST"), (int) (getenv("REDIS_PORT") ?: 6379), 3);
+            if ($pass !== false && $pass !== "" && $pass !== "null") {
+                $r->auth($user ? [$user, $pass] : $pass);
+            }
+            $r->ping();
+        } catch (Throwable $e) {
+            fwrite(STDERR, $e->getMessage());
+            exit(1);
+        }
+    '
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Laravel bootstrap
+# ─────────────────────────────────────────────────────────────────────────────
+cd "${APP_DIR}"
+
+artisan package:discover --ansi > /dev/null
+artisan config:cache > /dev/null
+artisan route:cache > /dev/null
+artisan view:cache > /dev/null
+
+if runs_web; then
+    if [[ "${RUN_MIGRATIONS:-true}" == true ]]; then
+        log "Running migrations..."
+        # --isolated takes a cache lock, so parallel web containers don't race.
+        artisan migrate --force --isolated
+    fi
+
+    [[ -L "${APP_DIR}/public/storage" ]] || artisan storage:link > /dev/null
+    artisan filament:assets > /dev/null
+
+    if [[ -n "${ADMIN_EMAIL:-}" && -n "${ADMIN_PASSWORD:-}" && ! -f "${STATE_DIR}/admin-created" ]]; then
+        log "Creating initial admin user ${ADMIN_EMAIL}..."
+        artisan make:admin \
+            --name="${ADMIN_NAME:-Administrator}" \
+            --email="${ADMIN_EMAIL}" \
+            --password="${ADMIN_PASSWORD}"
+        runuser -u www-data -- touch "${STATE_DIR}/admin-created"
+        log "Admin created. You can now remove ADMIN_PASSWORD from the environment."
+    fi
+fi
+
+if runs_workers; then
+    # Clones left behind by runs that were killed mid-flight. /tmp is local to
+    # this container and its workers haven't started yet, so this is safe.
+    rm -rf /tmp/test-runs-* /tmp/test_ssh_* 2>/dev/null || true
+fi
+
+if [[ "${ROLE}" == all && "${QUEUE_CONNECTION:-}" == redis ]]; then
+    # A single all-in-one container is the only consumer of the cypress queue,
+    # so anything still marked reserved belongs to a worker that no longer
+    # exists. Left alone, those jobs come back after retry_after and fail with
+    # MaxAttemptsExceededException. (Not done for split roles: other worker
+    # containers may legitimately hold reservations.)
+    runuser -u www-data -- php /usr/local/lib/signaldeck/flush-reserved-jobs.php || true
+fi
+
+echo "${ROLE}" > /run/signaldeck/role
+
+log "Starting services..."
+exec /usr/bin/supervisord -n -c /etc/supervisor/supervisord.conf

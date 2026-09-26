@@ -1,0 +1,149 @@
+# SignalDeck CI — scaled stack
+#
+# Same image, split into roles so test-runner capacity can be scaled
+# independently of the web tier:
+#
+#   docker compose -f docker-compose.scale.yml up -d --scale worker=3
+#
+# Each worker container runs WORKER_PROCESSES concurrent test runs.
+# Uses the same .env / Portainer variables as docker-compose.yml.
+
+x-signaldeck-env: &signaldeck-env
+  APP_URL: ${APP_URL:?Set APP_URL to the public URL of SignalDeck}
+  APP_KEY: ${APP_KEY:-}
+  APP_NAME: ${APP_NAME:-SignalDeck CI}
+  APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+  LOG_LEVEL: ${LOG_LEVEL:-warning}
+  DB_HOST: mysql
+  DB_DATABASE: ${DB_DATABASE:-signaldeck}
+  DB_USERNAME: ${DB_USERNAME:-signaldeck}
+  DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD}
+  REDIS_HOST: redis
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+  TRUSTED_PROXIES: ${TRUSTED_PROXIES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1,::1}
+  CYPRESS_JOB_TIMEOUT: ${CYPRESS_JOB_TIMEOUT:-10800}
+  WORKER_PROCESSES: ${WORKER_PROCESSES:-3}
+  WORKER_STOP_WAIT: ${WORKER_STOP_WAIT:-900}
+  PHP_FPM_MAX_CHILDREN: ${PHP_FPM_MAX_CHILDREN:-30}
+  MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-100M}
+  ADMIN_NAME: ${ADMIN_NAME:-Administrator}
+  ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+
+x-signaldeck: &signaldeck
+  image: ${SIGNALDECK_IMAGE:-ghcr.io/benwake1/signaldeck-ci}:${SIGNALDECK_TAG:-latest}
+  restart: unless-stopped
+  environment: *signaldeck-env
+  volumes:
+    # Shared between roles: workers write reports/artifacts, web serves them.
+    # (Or configure S3 in Settings and this mostly holds the app key.)
+    - signaldeck-data:/var/www/app/storage/app
+    - signaldeck-runner-cache:/var/www/.cache
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  web:
+    <<: *signaldeck
+    command: web
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-8080}:80"
+
+  worker:
+    <<: *signaldeck
+    command: worker
+    shm_size: 2gb
+    stop_grace_period: ${STOP_GRACE_PERIOD:-16m}
+    depends_on:
+      web:
+        # web runs migrations; workers start once the schema is in place
+        condition: service_healthy
+
+  scheduler:
+    <<: *signaldeck
+    command: scheduler
+    depends_on:
+      web:
+        condition: service_healthy
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-signaldeck}
+      MYSQL_USER: ${DB_USERNAME:-signaldeck}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD}
+    volumes:
+      - signaldeck-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    volumes:
+      - signaldeck-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ── Public access (optional, pick one) ─────────────────────────────────────
+  # COMPOSE_PROFILES=https   Caddy on ports 80/443 with automatic Let's Encrypt
+  #                          certificates for SIGNALDECK_DOMAIN.
+  # COMPOSE_PROFILES=tunnel  Cloudflare Tunnel — no open ports needed; point the
+  #                          tunnel's public hostname at http://web:80.
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${SIGNALDECK_DOMAIN:-} --to web:80
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+      - "${HTTP_REDIRECT_PORT:-80}:80"
+    volumes:
+      - signaldeck-caddy-data:/data
+      - signaldeck-caddy-config:/config
+    depends_on:
+      - web
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - web
+
+volumes:
+  signaldeck-data:
+  signaldeck-runner-cache:
+  signaldeck-mysql:
+  signaldeck-redis:
+  signaldeck-caddy-data:
+  signaldeck-caddy-config:
