@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   resolve:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       semver: ${{ steps.resolve.outputs.semver }}
@@ -70,7 +70,7 @@ jobs:
   build:
     needs: resolve
     if: needs.resolve.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
@@ -123,8 +123,11 @@ jobs:
 
           curl -fsS http://localhost:8080/up > /dev/null
           curl -fsS -o /dev/null -w 'login page: %{http_code}\n' http://localhost:8080/admin/login
-          # Proxy handling: HTTPS via X-Forwarded-Proto must produce https URLs
-          curl -fsS -H 'X-Forwarded-Proto: https' http://localhost:8080/admin/login | grep -q 'https://localhost:8080' \
+          # Proxy handling: HTTPS via X-Forwarded-Proto must produce https URLs.
+          # Capture first: `curl | grep -q` fails under pipefail when grep exits
+          # early and curl gets SIGPIPE (exit 23).
+          login_html=$(curl -fsS -H 'X-Forwarded-Proto: https' http://localhost:8080/admin/login)
+          grep -q 'https://localhost:8080' <<< "$login_html" \
             || { echo "::error::X-Forwarded-Proto not honoured"; exit 1; }
 
           docker compose exec -T signaldeck node --version

@@ -4,7 +4,15 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Ubuntu releases need a deliberate change: the ondrej/php PPA and
+      # package names (e.g. the *t64 libs) lag new releases.
+      - dependency-name: ubuntu
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
