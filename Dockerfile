@@ -18,6 +18,9 @@ ARG NODE_MAJOR=24
 # Empty = current stable at build time. Ignored on arm64 (no Chrome build exists).
 ARG CHROME_VERSION=""
 ARG PLAYWRIGHT_DEPS_VERSION=1.63.0
+# Changing this invalidates the build cache from the first layer, so OS
+# packages, Chrome and SSH host keys are refreshed. CI sets it to the ISO week.
+ARG CACHE_EPOCH=""
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=UTC \
@@ -26,7 +29,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # ─────────────────────────────────────────────────────────────────────────────
 # Base system
 # ─────────────────────────────────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y \
+RUN echo "cache epoch: ${CACHE_EPOCH:-none}" \
+    && apt-get update && apt-get upgrade -y && apt-get install -y \
         software-properties-common \
         ca-certificates \
         curl \
@@ -37,6 +41,32 @@ RUN apt-get update && apt-get install -y \
         zip \
         tini \
     && rm -rf /var/lib/apt/lists/*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SSH host keys for the common Git hosts, from each provider's published
+# source rather than trust-on-first-use. Without them a project with an SSH
+# URL but no deploy key fails with a misleading "Host key verification
+# failed" instead of "Permission denied (publickey)".
+# GitLab has no key endpoint: scanned keys must match its documented
+# fingerprints, otherwise the build fails.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN set -eu \
+    && curl -fsSL https://api.github.com/meta \
+        | grep -oE '"(ssh-[a-z0-9-]+|ecdsa-[a-z0-9-]+) [A-Za-z0-9+/=]+"' \
+        | tr -d '"' | sed 's/^/github.com /' > /tmp/known_hosts \
+    && [ "$(grep -c '^github.com ' /tmp/known_hosts)" -ge 3 ] \
+    && curl -fsSL https://bitbucket.org/site/ssh | grep '^bitbucket.org ' >> /tmp/known_hosts \
+    && ssh-keyscan -t ed25519,ecdsa,rsa gitlab.com 2>/dev/null > /tmp/gitlab \
+    && ssh-keygen -lf /tmp/gitlab | awk '{print $2}' | sort > /tmp/gitlab.fp \
+    && printf '%s\n' \
+        SHA256:HbW3g8zUjNSksFbqTiUWPWg2Bq1x8xdGUrliXFzSnUw \
+        SHA256:ROQFvPThGrW4RuWLoL9tq9I9zJ42fK4XywyRtbOz/EQ \
+        SHA256:eUXGGm1YGsMAS7vkcx6JOJdOGHPem5gQp4taiCfCLB8 \
+        | sort | diff - /tmp/gitlab.fp \
+    && cat /tmp/gitlab >> /tmp/known_hosts \
+    && install -m 0644 /tmp/known_hosts /etc/ssh/ssh_known_hosts \
+    && rm -f /tmp/known_hosts /tmp/gitlab /tmp/gitlab.fp \
+    && ssh-keygen -lf /etc/ssh/ssh_known_hosts
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHP 8.4 (Ondřej Surý PPA), Nginx, Supervisor
