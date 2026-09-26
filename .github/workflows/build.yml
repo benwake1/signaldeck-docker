@@ -80,7 +80,7 @@ jobs:
       PUBLISH: ${{ github.event_name != 'pull_request' }}
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' && vars.DOCKERHUB_IMAGE != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
