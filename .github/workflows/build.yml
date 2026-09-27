@@ -140,6 +140,13 @@ jobs:
           docker compose exec -T signaldeck node --version
           docker compose exec -T -u www-data signaldeck php artisan about --only=environment
 
+      # Real Cypress (in Chrome) and Playwright (chromium, firefox, webkit)
+      # runs against the ci-fixture branch, which only visits the
+      # container's own pages.
+      - name: End-to-end test runs
+        timeout-minutes: 35
+        run: .github/scripts/e2e.sh
+
       - name: Smoke test logs
         if: failure()
         run: docker compose logs --no-color
