@@ -118,7 +118,10 @@ done
 (( REDIS_QUEUE_RETRY_AFTER > WORKER_TIMEOUT ))        || warn "REDIS_QUEUE_RETRY_AFTER should be greater than WORKER_TIMEOUT."
 [[ "${MAX_UPLOAD_SIZE}" =~ ^[0-9]+[KkMmGg]?$ ]]       || fail "MAX_UPLOAD_SIZE must look like 100M."
 [[ "${PHP_MEMORY_LIMIT}" =~ ^(-1|[0-9]+[KkMmGg]?)$ ]] || fail "PHP_MEMORY_LIMIT must look like 512M."
-[[ "${TRUSTED_PROXIES}" =~ ^[0-9A-Fa-f:.,/*\ ]+$ ]]    || fail "TRUSTED_PROXIES must be a comma-separated list of IPs/CIDRs, or '*'."
+SIGNALDECK_THEME="${SIGNALDECK_THEME:-signaldeck}"
+[[ "${SIGNALDECK_THEME}" =~ ^(signaldeck|default)$ ]]   || fail "SIGNALDECK_THEME must be 'signaldeck' or 'default'."
+[[ "${TRUSTED_PROXIES}" =~ ^[0-9A-Fa-f:.,/*\ ]*(cloudflare[0-9A-Fa-f:.,/\ ]*)?$ ]] \
+    || fail "TRUSTED_PROXIES must be a comma-separated list of IPs/CIDRs (optionally including 'cloudflare'), or '*'."
 
 export CYPRESS_JOB_TIMEOUT WORKER_TIMEOUT REDIS_QUEUE_RETRY_AFTER DB_QUEUE_RETRY_AFTER
 
@@ -144,12 +147,51 @@ resolve_app_key
 # ─────────────────────────────────────────────────────────────────────────────
 # Render Nginx / PHP-FPM / Supervisor config for this role
 # ─────────────────────────────────────────────────────────────────────────────
+# The upstream app only loads its SignalDeck theme with IS_HOSTED=true, which
+# also hides the Mail and Branding settings pages. Instead, Nginx adds the
+# theme (built into the image already) to admin pages as it serves them.
+render_theme() {
+    local maps=/etc/nginx/signaldeck-theme-maps.conf filters=/etc/nginx/signaldeck-theme-filters.conf css
+    : > "${maps}"; : > "${filters}"
+    [[ "${SIGNALDECK_THEME}" == signaldeck ]] || return 0
+
+    css=$(php -r '$m = json_decode(@file_get_contents("/var/www/app/public/build/manifest.json"), true);
+                  echo $m["resources/css/signaldeck-theme.css"]["file"] ?? "";')
+    if [[ -z "${css}" ]]; then
+        warn "SignalDeck theme not found in this build; using the default theme."
+        return 0
+    fi
+
+    cat > "${maps}" <<EOF
+map \$request_uri \$signaldeck_theme_head {
+    default "</head>";
+    "~^/admin(/|\?|\$)" '<script>document.documentElement.classList.add("dark");try{localStorage.setItem("theme","dark")}catch(e){}</script><link rel="preconnect" href="https://fonts.bunny.net"><link rel="stylesheet" href="https://fonts.bunny.net/css?family=inter:400,500,600,700|jetbrains-mono:400,500&display=swap"><link rel="stylesheet" href="/build/${css}"><style>.fi-theme-switcher{display:none!important}</style></head>';
+}
+map \$request_uri \$signaldeck_theme_body {
+    default 'class="fi-body ';
+    "~^/admin(/|\?|\$)" 'class="fi-body signaldeck-hosted ';
+}
+EOF
+    cat > "${filters}" <<'EOF'
+sub_filter '</head>' $signaldeck_theme_head;
+sub_filter 'class="fi-body ' $signaldeck_theme_body;
+EOF
+}
+
 render_web_config() {
+    render_theme
     local proxies="${TRUSTED_PROXIES// /}" real_ip="" entry
     [[ "${proxies}" == "*" ]] && proxies="0.0.0.0/0,::/0"
     IFS=',' read -ra entries <<< "${proxies}"
     for entry in "${entries[@]}"; do
-        [[ -n "${entry}" ]] && real_ip+="    set_real_ip_from ${entry};\n"
+        if [[ "${entry}" == cloudflare ]]; then
+            # Cloudflare's proxy ranges, fetched when the image was built
+            while read -r entry; do
+                real_ip+="    set_real_ip_from ${entry};\n"
+            done < /usr/local/lib/signaldeck/cloudflare-ips
+        elif [[ -n "${entry}" ]]; then
+            real_ip+="    set_real_ip_from ${entry};\n"
+        fi
     done
 
     sed -e "s|__SET_REAL_IP_FROM__|${real_ip}|" \

@@ -26,6 +26,7 @@ x-signaldeck-env: &signaldeck-env
   WORKER_STOP_WAIT: ${WORKER_STOP_WAIT:-900}
   PHP_FPM_MAX_CHILDREN: ${PHP_FPM_MAX_CHILDREN:-30}
   MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-100M}
+  SIGNALDECK_THEME: ${SIGNALDECK_THEME:-signaldeck}
   ADMIN_NAME: ${ADMIN_NAME:-Administrator}
   ADMIN_EMAIL: ${ADMIN_EMAIL:-}
   ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
@@ -119,7 +120,25 @@ services:
     image: caddy:2
     profiles: ["https"]
     restart: unless-stopped
-    command: caddy reverse-proxy --from ${SIGNALDECK_DOMAIN:-} --to web:80
+    # Passes X-Forwarded-For through untouched (Caddy appends the connecting
+    # IP); the signaldeck container decides which proxies to trust from
+    # TRUSTED_PROXIES. Written inline so the stack needs no extra files.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cat > /etc/caddy/Caddyfile <<'EOF'
+        {
+        	servers {
+        		trusted_proxies static 0.0.0.0/0 ::/0
+        	}
+        }
+        {$$SIGNALDECK_DOMAIN} {
+        	reverse_proxy web:80
+        }
+        EOF
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    environment:
+      SIGNALDECK_DOMAIN: ${SIGNALDECK_DOMAIN:-}
     ports:
       - "${HTTPS_PORT:-443}:443"
       - "${HTTPS_PORT:-443}:443/udp"

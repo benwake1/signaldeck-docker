@@ -94,12 +94,13 @@ Mail, Google SSO, Slack, S3 storage and branding are configured in the app under
 | `APP_KEY` | generated | Encrypts stored secrets. If empty, generated on first boot into `signaldeck-data/.signaldeck/app.key`. **Back it up.** |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | — | Creates the first admin on first boot only |
 | `HTTP_PORT` / `HTTP_BIND` | `8080` / `0.0.0.0` | Published web port |
-| `TRUSTED_PROXIES` | private ranges | Proxies allowed to set `X-Forwarded-For`; `*` trusts all |
+| `TRUSTED_PROXIES` | private ranges | Proxies allowed to set `X-Forwarded-For`. Add `cloudflare` for Cloudflare's proxy ranges (built into the image, refreshed weekly); `*` trusts all |
 | `WORKER_PROCESSES` | `3` | Concurrent test runs per container |
 | `CYPRESS_JOB_TIMEOUT` | `10800` | Max seconds per run. Worker timeout and queue retry window are derived from it |
 | `WORKER_STOP_WAIT` / `STOP_GRACE_PERIOD` | `900` / `16m` | How long in-flight runs get to finish on stop/redeploy |
 | `PHP_FPM_MAX_CHILDREN` | `30` | Each open live-log view holds one PHP worker |
 | `MAX_UPLOAD_SIZE` | `100M` | Nginx + PHP upload limit |
+| `SIGNALDECK_THEME` | `signaldeck` | Dark SignalDeck theme for the admin panel; `default` for the standard light/dark theme. Colours and logo are still set under **Settings → Branding** |
 | `LOG_LEVEL` | `warning` | Logs go to `docker logs` |
 | `SIGNALDECK_TAG` | `latest` | Pin a version in production |
 
@@ -126,7 +127,14 @@ Best for a VPS or any server with a public IP.
    ```
 4. `docker compose up -d` — the certificate is issued on first start and renewed automatically.
 
-Using Cloudflare's proxy (orange cloud)? Set SSL/TLS mode to **Full (strict)**; Caddy's certificate is trusted.
+Using Cloudflare's proxy (orange cloud)?
+
+- Set SSL/TLS mode to **Full (strict)**; Caddy's certificate is trusted.
+- Add `cloudflare` to `TRUSTED_PROXIES` so the app sees visitors' real IPs rather than Cloudflare's (login rate limits are per IP):
+  ```env
+  TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1,::1,cloudflare
+  ```
+- Cloudflare limits uploads to 100 MB on the Free and Pro plans, whatever `MAX_UPLOAD_SIZE` says.
 
 Ports 80/443 already used by another web server on this machine? Use [Option C](#option-c--your-existing-reverse-proxy) (proxy through it) or [Option B](#option-b--cloudflare-tunnel-no-open-ports) (Cloudflare Tunnel) instead — Let's Encrypt needs the standard ports.
 
@@ -152,7 +160,7 @@ Traefik, Nginx Proxy Manager, host Nginx/Apache, etc. Proxy to the container's H
 - not buffer `/api/v1/test-runs/*/stream` — live logs use Server-Sent Events (`proxy_buffering off;` in Nginx),
 - allow uploads up to `MAX_UPLOAD_SIZE` (`client_max_body_size 100M;` in Nginx).
 
-If the proxy isn't on a private network address, add its IP to `TRUSTED_PROXIES`.
+If the proxy isn't on a private network address, add its IP to `TRUSTED_PROXIES`. If Cloudflare's proxy sits in front of it, add `cloudflare` as well, and make sure your proxy passes the incoming `X-Forwarded-For` on rather than replacing it.
 
 In Portainer, put `COMPOSE_PROFILES`, `SIGNALDECK_DOMAIN` / `CLOUDFLARE_TUNNEL_TOKEN` in the stack's environment variables alongside the others.
 

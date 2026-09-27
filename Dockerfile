@@ -68,6 +68,15 @@ RUN set -eu \
     && rm -f /tmp/known_hosts /tmp/gitlab /tmp/gitlab.fp \
     && ssh-keygen -lf /etc/ssh/ssh_known_hosts
 
+# Cloudflare's published proxy ranges, for TRUSTED_PROXIES=...,cloudflare.
+# Refreshed on the weekly rebuild (CACHE_EPOCH).
+RUN set -eu \
+    && mkdir -p /usr/local/lib/signaldeck \
+    && { curl -fsSL https://www.cloudflare.com/ips-v4; echo; curl -fsSL https://www.cloudflare.com/ips-v6; echo; } \
+        | grep -E '^[0-9A-Fa-f:.]+/[0-9]+$' > /usr/local/lib/signaldeck/cloudflare-ips \
+    && [ "$(wc -l < /usr/local/lib/signaldeck/cloudflare-ips)" -ge 10 ] \
+    && cat /usr/local/lib/signaldeck/cloudflare-ips
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PHP 8.4 (Ondřej Surý PPA), Nginx, Supervisor
 # MySQL + Redis only — SQLite is intentionally not supported.
