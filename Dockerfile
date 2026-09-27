@@ -49,13 +49,19 @@ RUN echo "cache epoch: ${CACHE_EPOCH:-none}" \
 # failed" instead of "Permission denied (publickey)".
 # GitLab has no key endpoint: scanned keys must match its documented
 # fingerprints, otherwise the build fails.
+# The optional github_token build secret avoids GitHub's 60-requests-an-hour
+# limit for anonymous API calls (shared CI runners hit it); it isn't stored
+# in the image.
 # ─────────────────────────────────────────────────────────────────────────────
-RUN set -eu \
-    && curl -fsSL https://api.github.com/meta \
+RUN --mount=type=secret,id=github_token,required=false \
+    set -eu \
+    && auth="" \
+    && if [ -s /run/secrets/github_token ]; then auth="Authorization: Bearer $(cat /run/secrets/github_token)"; fi \
+    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 ${auth:+-H "$auth"} https://api.github.com/meta \
         | grep -oE '"(ssh-[a-z0-9-]+|ecdsa-[a-z0-9-]+) [A-Za-z0-9+/=]+"' \
         | tr -d '"' | sed 's/^/github.com /' > /tmp/known_hosts \
     && [ "$(grep -c '^github.com ' /tmp/known_hosts)" -ge 3 ] \
-    && curl -fsSL https://bitbucket.org/site/ssh | grep '^bitbucket.org ' >> /tmp/known_hosts \
+    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 https://bitbucket.org/site/ssh | grep '^bitbucket.org ' >> /tmp/known_hosts \
     && ssh-keyscan -t ed25519,ecdsa,rsa gitlab.com 2>/dev/null > /tmp/gitlab \
     && ssh-keygen -lf /tmp/gitlab | awk '{print $2}' | sort > /tmp/gitlab.fp \
     && printf '%s\n' \
@@ -72,7 +78,7 @@ RUN set -eu \
 # Refreshed on the weekly rebuild (CACHE_EPOCH).
 RUN set -eu \
     && mkdir -p /usr/local/lib/signaldeck \
-    && { curl -fsSL https://www.cloudflare.com/ips-v4; echo; curl -fsSL https://www.cloudflare.com/ips-v6; echo; } \
+    && { curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 https://www.cloudflare.com/ips-v4; echo; curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 https://www.cloudflare.com/ips-v6; echo; } \
         | grep -E '^[0-9A-Fa-f:.]+/[0-9]+$' > /usr/local/lib/signaldeck/cloudflare-ips \
     && [ "$(wc -l < /usr/local/lib/signaldeck/cloudflare-ips)" -ge 10 ] \
     && cat /usr/local/lib/signaldeck/cloudflare-ips

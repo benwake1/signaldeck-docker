@@ -101,6 +101,9 @@ jobs:
           build-args: |
             SIGNALDECK_VERSION=${{ env.VERSION }}
             CACHE_EPOCH=${{ env.CACHE_EPOCH }}
+          # Authenticated GitHub API call for SSH host keys (see Dockerfile)
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -195,6 +198,9 @@ jobs:
           build-args: |
             SIGNALDECK_VERSION=${{ env.VERSION }}
             CACHE_EPOCH=${{ env.CACHE_EPOCH }}
+          # Authenticated GitHub API call for SSH host keys (see Dockerfile)
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
