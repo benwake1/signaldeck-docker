@@ -196,7 +196,7 @@ RUN usermod -d /var/www www-data \
     && chown -R www-data:www-data /var/www \
     && rm -f /etc/nginx/sites-enabled/default /etc/php/8.4/fpm/pool.d/www.conf \
     && sed -i 's|^;*error_log = .*|error_log = /proc/self/fd/2|' /etc/php/8.4/fpm/php-fpm.conf \
-    && chmod +x /usr/local/bin/signaldeck-entrypoint /usr/local/bin/signaldeck-healthcheck \
+    && chmod +x /usr/local/bin/signaldeck-entrypoint /usr/local/bin/signaldeck-healthcheck /usr/local/lib/signaldeck/graceful-worker \
     && if [ "${TARGETARCH}" = "amd64" ]; then \
          install -m 0755 /usr/local/lib/signaldeck/chrome-cypress /usr/local/bin/chrome-cypress; \
        fi

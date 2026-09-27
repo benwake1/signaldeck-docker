@@ -1,0 +1,30 @@
+name: Docker Hub description
+
+# Keeps the Docker Hub overview in sync with README.md.
+# Needs DOCKERHUB_TOKEN with Read, Write, Delete scope (descriptions can't be
+# edited with Read & Write).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - .github/workflows/dockerhub-description.yml
+  workflow_dispatch:
+
+jobs:
+  sync:
+    if: vars.DOCKERHUB_IMAGE != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_IMAGE }}
+          short-description: Self-hosted Cypress & Playwright test dashboard. One image with everything, plus MySQL and Redis.
+          readme-filepath: README.md
+          # Turns relative links into absolute GitHub links on Docker Hub
+          enable-url-completion: true

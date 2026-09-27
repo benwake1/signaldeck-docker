@@ -5,10 +5,11 @@ The self-hosted Docker image for [SignalDeck CI](https://github.com/benwake1/sig
 One image contains everything: PHP 8.4, Nginx, Node, Google Chrome, Xvfb and the Playwright system libraries. The stack adds MySQL and Redis. No bare-metal setup required.
 
 ```
-ghcr.io/benwake1/signaldeck-ci:<version>
+ghcr.io/benwake1/signaldeck-ci:<version>     # GitHub Container Registry
+benwake1/signaldeck-ci:<version>             # Docker Hub
 ```
 
-Image tags follow upstream releases: `1.2.4`, `1.2`, `1`, `latest`.
+Both registries carry the same multi-arch images (amd64 + arm64). Tags follow upstream releases: `1.2.4`, `1.2`, `1`, `latest`. The compose files use GHCR by default; set `SIGNALDECK_IMAGE=benwake1/signaldeck-ci` to pull from Docker Hub instead.
 
 ---
 
@@ -127,6 +128,8 @@ Best for a VPS or any server with a public IP.
 
 Using Cloudflare's proxy (orange cloud)? Set SSL/TLS mode to **Full (strict)**; Caddy's certificate is trusted.
 
+Ports 80/443 already used by another web server on this machine? Use [Option C](#option-c--your-existing-reverse-proxy) (proxy through it) or [Option B](#option-b--cloudflare-tunnel-no-open-ports) (Cloudflare Tunnel) instead — Let's Encrypt needs the standard ports.
+
 ### Option B — Cloudflare Tunnel (no open ports)
 
 Best for home labs, NAS boxes and servers behind NAT.
@@ -165,11 +168,25 @@ Migrations run automatically on start. Test runs that are in progress get `WORKE
 ## Backups
 
 ```bash
-docker compose exec mysql sh -c 'mysqldump -u root -p"$MYSQL_ROOT_PASSWORD" --single-transaction signaldeck' > signaldeck.sql
+docker compose exec -T mysql sh -c 'mysqldump -u root -p"$MYSQL_ROOT_PASSWORD" --single-transaction signaldeck' > signaldeck.sql
 docker run --rm -v signaldeck_signaldeck-data:/data -v "$PWD":/backup alpine tar czf /backup/signaldeck-data.tgz -C /data .
 ```
 
-(The volume name is prefixed with your stack/project name.)
+The data archive includes the generated `APP_KEY` (if you didn't set one), which is needed to decrypt stored settings and deploy keys — keep both files together. The volume name is prefixed with your stack/project name (`docker volume ls`).
+
+### Restoring
+
+Into a new, empty stack (new passwords in `.env` are fine):
+
+```bash
+docker compose up -d --wait mysql redis
+docker compose exec -T mysql sh -c 'mysql -u root -p"$MYSQL_ROOT_PASSWORD" signaldeck' < signaldeck.sql
+docker compose create signaldeck
+docker run --rm -v signaldeck_signaldeck-data:/data -v "$PWD":/backup alpine tar xzf /backup/signaldeck-data.tgz -C /data
+docker compose up -d
+```
+
+Restore the database **before** the app's first start, otherwise it migrates an empty database. If `APP_KEY` is set in the old `.env`, copy it across.
 
 ## Useful commands
 

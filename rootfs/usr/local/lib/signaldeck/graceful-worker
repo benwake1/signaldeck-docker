@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# Runs a queue worker and holds back stop signals while it is running a job.
+#
+# Laravel's worker handles SIGTERM itself, but the signal interrupts the
+# stream_select() the test-run job uses to read Cypress/Playwright output.
+# The job treats that as an error and the run fails — so a "graceful" stop
+# would kill every in-progress run.
+#
+# Instead, on SIGTERM/SIGINT/SIGQUIT this wrapper waits until the worker has
+# no child processes (no run in progress) and only then passes SIGTERM on.
+# Supervisor's stopwaitsecs (WORKER_STOP_WAIT) still bounds the wait: after
+# it, supervisor SIGKILLs the process group.
+#
+# There is a small window where a worker could pick up a job just as it is
+# being stopped; that job fails early and can be re-run.
+
+set -u
+
+"$@" &
+worker=$!
+stopping=0
+
+trap 'stopping=1' TERM INT QUIT
+
+while kill -0 "$worker" 2>/dev/null; do
+    if [ "$stopping" = 1 ] && ! ps --ppid "$worker" -o pid= >/dev/null 2>&1; then
+        kill -TERM "$worker" 2>/dev/null
+        break
+    fi
+    # Background sleep + wait, so the trap fires immediately.
+    sleep 1 &
+    wait $! 2>/dev/null
+done
+
+wait "$worker"
